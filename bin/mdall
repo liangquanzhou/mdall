@@ -1,0 +1,448 @@
+#!/bin/bash
+# Markdown 完整渲染器 - Mermaid 图表 + LaTeX 公式
+# - Mermaid 代码块 → PNG 图片
+# - 行间 LaTeX ($$...$$) → pdflatex → PNG 图片
+# - 行内 LaTeX ($...$) → Unicode 替换
+
+set -euo pipefail
+
+# 颜色定义
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# 使用说明
+usage() {
+    cat << EOF
+用法: $(basename "$0") <markdown-file> [options]
+
+自动渲染 Markdown 中的 Mermaid 图表和 LaTeX 公式
+
+选项:
+    -p, --pager     使用分页器查看
+    -k, --keep      保留临时文件（调试用）
+    -h, --help      显示此帮助
+
+示例:
+    $(basename "$0") document.md
+    $(basename "$0") document.md --pager
+EOF
+    exit 0
+}
+
+# 检查依赖
+check_dependencies() {
+    local missing=()
+
+    if ! command -v mcat &> /dev/null; then
+        missing+=("mcat")
+    fi
+
+    if ! command -v mmdc &> /dev/null; then
+        missing+=("mermaid-cli (mmdc)")
+    fi
+
+    if [ ${#missing[@]} -gt 0 ]; then
+        echo -e "${RED}错误: 缺少依赖工具:${NC}"
+        printf '  - %s\n' "${missing[@]}"
+        echo ""
+        echo "安装方法:"
+        echo "  brew install mcat"
+        echo "  npm install -g @mermaid-js/mermaid-cli"
+        exit 1
+    fi
+
+    # LaTeX 依赖（可选，缺少时跳过渲染）
+    if ! command -v pdflatex &> /dev/null; then
+        echo -e "${YELLOW}提示: 未安装 pdflatex，行间 LaTeX 公式将保留原文${NC}"
+    fi
+}
+
+# --- LaTeX 行内公式 → Unicode 替换 ---
+latex_to_unicode() {
+    local text="$1"
+    # 不在代码块内才替换（调用方保证）
+    # 用 sed 做逐步替换，顺序：先长后短避免误替换
+
+    echo "$text" | sed \
+        -e 's/\\infty/∞/g' \
+        -e 's/\\partial/∂/g' \
+        -e 's/\\nabla/∇/g' \
+        -e 's/\\forall/∀/g' \
+        -e 's/\\exists/∃/g' \
+        -e 's/\\emptyset/∅/g' \
+        -e 's/\\approx/≈/g' \
+        -e 's/\\equiv/≡/g' \
+        -e 's/\\neq/≠/g' \
+        -e 's/\\leq/≤/g' \
+        -e 's/\\geq/≥/g' \
+        -e 's/\\ll/≪/g' \
+        -e 's/\\gg/≫/g' \
+        -e 's/\\pm/±/g' \
+        -e 's/\\mp/∓/g' \
+        -e 's/\\times/×/g' \
+        -e 's/\\cdot/·/g' \
+        -e 's/\\div/÷/g' \
+        -e 's/\\circ/∘/g' \
+        -e 's/\\sqrt/√/g' \
+        -e 's/\\sum/∑/g' \
+        -e 's/\\prod/∏/g' \
+        -e 's/\\int/∫/g' \
+        -e 's/\\oint/∮/g' \
+        -e 's/\\cup/∪/g' \
+        -e 's/\\cap/∩/g' \
+        -e 's/\\subset/⊂/g' \
+        -e 's/\\supset/⊃/g' \
+        -e 's/\\subseteq/⊆/g' \
+        -e 's/\\supseteq/⊇/g' \
+        -e 's/\\in /∈ /g' \
+        -e 's/\\notin/∉/g' \
+        -e 's/\\to/→/g' \
+        -e 's/\\rightarrow/→/g' \
+        -e 's/\\leftarrow/←/g' \
+        -e 's/\\Rightarrow/⇒/g' \
+        -e 's/\\Leftarrow/⇐/g' \
+        -e 's/\\leftrightarrow/↔/g' \
+        -e 's/\\mapsto/↦/g' \
+        -e 's/\\alpha/α/g' \
+        -e 's/\\beta/β/g' \
+        -e 's/\\gamma/γ/g' \
+        -e 's/\\delta/δ/g' \
+        -e 's/\\epsilon/ε/g' \
+        -e 's/\\varepsilon/ε/g' \
+        -e 's/\\zeta/ζ/g' \
+        -e 's/\\eta/η/g' \
+        -e 's/\\theta/θ/g' \
+        -e 's/\\iota/ι/g' \
+        -e 's/\\kappa/κ/g' \
+        -e 's/\\lambda/λ/g' \
+        -e 's/\\mu/μ/g' \
+        -e 's/\\nu/ν/g' \
+        -e 's/\\xi/ξ/g' \
+        -e 's/\\pi/π/g' \
+        -e 's/\\rho/ρ/g' \
+        -e 's/\\sigma/σ/g' \
+        -e 's/\\tau/τ/g' \
+        -e 's/\\upsilon/υ/g' \
+        -e 's/\\phi/φ/g' \
+        -e 's/\\varphi/φ/g' \
+        -e 's/\\chi/χ/g' \
+        -e 's/\\psi/ψ/g' \
+        -e 's/\\omega/ω/g' \
+        -e 's/\\Gamma/Γ/g' \
+        -e 's/\\Delta/Δ/g' \
+        -e 's/\\Theta/Θ/g' \
+        -e 's/\\Lambda/Λ/g' \
+        -e 's/\\Xi/Ξ/g' \
+        -e 's/\\Pi/Π/g' \
+        -e 's/\\Sigma/Σ/g' \
+        -e 's/\\Phi/Φ/g' \
+        -e 's/\\Psi/Ψ/g' \
+        -e 's/\\Omega/Ω/g' \
+        -e 's/\\mathbb{R}/ℝ/g' \
+        -e 's/\\mathbb{N}/ℕ/g' \
+        -e 's/\\mathbb{Z}/ℤ/g' \
+        -e 's/\\mathbb{Q}/ℚ/g' \
+        -e 's/\\mathbb{C}/ℂ/g' \
+        -e 's/\^{0}/⁰/g' -e 's/\^0/⁰/g' \
+        -e 's/\^{1}/¹/g' -e 's/\^1/¹/g' \
+        -e 's/\^{2}/²/g' -e 's/\^2/²/g' \
+        -e 's/\^{3}/³/g' -e 's/\^3/³/g' \
+        -e 's/\^{n}/ⁿ/g' -e 's/\^n/ⁿ/g' \
+        -e 's/\^{i}/ⁱ/g' -e 's/\^i/ⁱ/g' \
+        -e 's/_{0}/₀/g' -e 's/_0/₀/g' \
+        -e 's/_{1}/₁/g' -e 's/_1/₁/g' \
+        -e 's/_{2}/₂/g' -e 's/_2/₂/g' \
+        -e 's/_{i}/ᵢ/g' -e 's/_i/ᵢ/g' \
+        -e 's/_{n}/ₙ/g' -e 's/_n/ₙ/g' \
+        -e 's/\\frac{\([^}]*\)}{\([^}]*\)}/\1\/\2/g' \
+        -e 's/\\text{\([^}]*\)}/\1/g' \
+        -e 's/\\mathbf{\([^}]*\)}/\1/g' \
+        -e 's/\\mathrm{\([^}]*\)}/\1/g' \
+        -e 's/\\left//g' -e 's/\\right//g' \
+        -e 's/\\[{}]//g' \
+        -e 's/\$//g'
+}
+
+# --- LaTeX 行间公式 → PNG ---
+render_latex_block() {
+    local formula="$1"
+    local output_png="$2"
+    local tex_file="$TEMP_DIR/latex-tmp.tex"
+    local pdf_file="$TEMP_DIR/latex-tmp.pdf"
+
+    # 去掉公式尾部空行（pdflatex 对 \[ \] 之间的空行报错）
+    formula=$(echo "$formula" | sed '/^[[:space:]]*$/d')
+
+    cat > "$tex_file" << TEXEOF
+\\documentclass[border=8pt,varwidth]{standalone}
+\\usepackage{amsmath,amssymb,amsfonts}
+\\begin{document}
+\\[
+${formula}
+\\]
+\\end{document}
+TEXEOF
+
+    # pdflatex 即使成功也可能返回非零，所以检查 PDF 是否生成
+    rm -f "$pdf_file"
+    pdflatex -interaction=nonstopmode -output-directory="$TEMP_DIR" "$tex_file" >/dev/null 2>&1 || true
+
+    if [[ -f "$pdf_file" ]]; then
+        if magick -density 300 "$pdf_file" -quality 100 -background white -flatten "$output_png" 2>/dev/null; then
+            return 0
+        fi
+    fi
+    return 1
+}
+
+# 解析参数
+USE_PAGER=false
+KEEP_TEMP=false
+INPUT_FILE=""
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -p|--pager)
+            USE_PAGER=true
+            shift
+            ;;
+        -k|--keep)
+            KEEP_TEMP=true
+            shift
+            ;;
+        -h|--help)
+            usage
+            ;;
+        *)
+            if [[ -z "$INPUT_FILE" ]]; then
+                INPUT_FILE="$1"
+            else
+                echo -e "${RED}错误: 未知参数 '$1'${NC}"
+                usage
+            fi
+            shift
+            ;;
+    esac
+done
+
+# 检查输入文件
+if [[ -z "$INPUT_FILE" ]]; then
+    echo -e "${RED}错误: 请提供 Markdown 文件${NC}"
+    usage
+fi
+
+if [[ ! -f "$INPUT_FILE" ]]; then
+    echo -e "${RED}错误: 文件不存在: $INPUT_FILE${NC}"
+    exit 1
+fi
+
+# 检查依赖
+check_dependencies
+
+HAS_PDFLATEX=false
+command -v pdflatex &>/dev/null && HAS_PDFLATEX=true
+
+# 缓存目录
+CACHE_DIR="$HOME/.cache/mdview"
+mkdir -p "$CACHE_DIR"
+
+# 生成文件的缓存键（基于文件路径和修改时间）
+INPUT_ABS=$(realpath "$INPUT_FILE")
+FILE_MTIME=$(stat -f %m "$INPUT_FILE" 2>/dev/null || stat -c %Y "$INPUT_FILE" 2>/dev/null)
+CACHE_KEY=$(echo "${INPUT_ABS}:${FILE_MTIME}" | md5sum | awk '{print $1}' 2>/dev/null || echo "${INPUT_ABS}:${FILE_MTIME}" | md5 2>/dev/null)
+CACHE_SUBDIR="$CACHE_DIR/$CACHE_KEY"
+
+# 检查缓存
+if [[ -d "$CACHE_SUBDIR" && -f "$CACHE_SUBDIR/rendered.md" ]]; then
+    echo -e "${GREEN}✨ 使用缓存（文件未修改）${NC}"
+    TEMP_DIR="$CACHE_SUBDIR"
+    TEMP_MD="$TEMP_DIR/rendered.md"
+    IMAGES_DIR="$TEMP_DIR/images"
+    USE_CACHE=true
+else
+    # 创建新的临时目录
+    TEMP_DIR="$CACHE_SUBDIR"
+    TEMP_MD="$TEMP_DIR/rendered.md"
+    IMAGES_DIR="$TEMP_DIR/images"
+    mkdir -p "$IMAGES_DIR"
+    USE_CACHE=false
+
+    # 清理旧缓存（保留最近10个）
+    ls -t "$CACHE_DIR" | tail -n +11 | xargs -I {} rm -rf "$CACHE_DIR/{}" 2>/dev/null || true
+fi
+
+# 清理函数（缓存模式下不清理）
+cleanup() {
+    if [[ "$KEEP_TEMP" == "true" ]]; then
+        echo -e "${YELLOW}缓存保存在: $TEMP_DIR${NC}"
+    fi
+}
+trap cleanup EXIT
+
+echo -e "${BLUE}📄 处理 Markdown 文件: $INPUT_FILE${NC}"
+
+# 如果使用缓存，跳过渲染直接显示
+if [[ "$USE_CACHE" == "true" ]]; then
+    IMAGE_COUNT=$(ls -1 "$IMAGES_DIR"/*.png 2>/dev/null | wc -l | tr -d ' ')
+
+    if [ "$IMAGE_COUNT" -gt 0 ]; then
+        echo -e "${GREEN}✅ 缓存中有 $IMAGE_COUNT 个已渲染的图片${NC}"
+    fi
+    echo ""
+
+else
+    # 执行正常的渲染流程
+
+MERMAID_COUNT=0
+LATEX_COUNT=0
+IN_MERMAID=false
+IN_LATEX_BLOCK=false
+IN_CODE_BLOCK=false
+CURRENT_MERMAID=""
+CURRENT_LATEX=""
+MERMAID_START_LINE=0
+LATEX_START_LINE=0
+
+# 处理 Markdown 文件
+{
+    line_number=0
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        line_number=$((line_number + 1))
+
+        # --- 检测通用代码块（非 mermaid）的开始/结束 ---
+        if [[ "$IN_MERMAID" == "false" && "$IN_LATEX_BLOCK" == "false" ]]; then
+            if [[ "$line" =~ ^\`\`\` && ! "$line" =~ ^\`\`\`mermaid ]]; then
+                if [[ "$IN_CODE_BLOCK" == "false" ]]; then
+                    IN_CODE_BLOCK=true
+                else
+                    IN_CODE_BLOCK=false
+                fi
+                echo "$line"
+                continue
+            fi
+        fi
+
+        # 代码块内不处理任何内容
+        if [[ "$IN_CODE_BLOCK" == "true" ]]; then
+            echo "$line"
+            continue
+        fi
+
+        # --- Mermaid 代码块 ---
+        if [[ "$line" =~ ^\`\`\`mermaid ]]; then
+            IN_MERMAID=true
+            MERMAID_START_LINE=$line_number
+            CURRENT_MERMAID=""
+            continue
+        fi
+
+        if [[ "$IN_MERMAID" == "true" && "$line" =~ ^\`\`\`$ ]]; then
+            IN_MERMAID=false
+            MERMAID_COUNT=$((MERMAID_COUNT + 1))
+
+            MERMAID_FILE="$TEMP_DIR/mermaid-$MERMAID_COUNT.mmd"
+            IMAGE_FILE="$IMAGES_DIR/mermaid-$MERMAID_COUNT.png"
+
+            echo "$CURRENT_MERMAID" > "$MERMAID_FILE"
+
+            echo -e "${GREEN}  🎨 渲染 Mermaid #$MERMAID_COUNT (行 $MERMAID_START_LINE)...${NC}" >&2
+
+            if mmdc -i "$MERMAID_FILE" -o "$IMAGE_FILE" -b white -w 2400 -s 2 --quiet 2>/dev/null; then
+                echo ""
+                echo "**Mermaid 图表 #$MERMAID_COUNT:**"
+                echo ""
+                echo "![Mermaid Diagram $MERMAID_COUNT]($IMAGE_FILE)"
+                echo ""
+            else
+                echo -e "${RED}  ⚠️  Mermaid 渲染失败，保留原始代码${NC}" >&2
+                echo '```mermaid'
+                echo "$CURRENT_MERMAID"
+                echo '```'
+            fi
+
+            CURRENT_MERMAID=""
+            continue
+        fi
+
+        if [[ "$IN_MERMAID" == "true" ]]; then
+            CURRENT_MERMAID+="$line"$'\n'
+            continue
+        fi
+
+        # --- LaTeX 行间公式 ($$...$$) ---
+        # 检测 $$ 开始（独占一行）
+        if [[ "$IN_LATEX_BLOCK" == "false" && "$line" == '$$' ]]; then
+            IN_LATEX_BLOCK=true
+            LATEX_START_LINE=$line_number
+            CURRENT_LATEX=""
+            continue
+        fi
+
+        # 检测 $$ 结束
+        if [[ "$IN_LATEX_BLOCK" == "true" && "$line" == '$$' ]]; then
+            IN_LATEX_BLOCK=false
+            LATEX_COUNT=$((LATEX_COUNT + 1))
+
+            if [[ "$HAS_PDFLATEX" == "true" ]]; then
+                IMAGE_FILE="$IMAGES_DIR/latex-$LATEX_COUNT.png"
+
+                echo -e "${GREEN}  📐 渲染 LaTeX #$LATEX_COUNT (行 $LATEX_START_LINE)...${NC}" >&2
+
+                if render_latex_block "$CURRENT_LATEX" "$IMAGE_FILE"; then
+                    echo ""
+                    echo "![LaTeX Formula $LATEX_COUNT]($IMAGE_FILE)"
+                    echo ""
+                else
+                    echo -e "${RED}  ⚠️  LaTeX 渲染失败，使用 Unicode 替代${NC}" >&2
+                    echo ""
+                    echo "  $(latex_to_unicode "$CURRENT_LATEX")"
+                    echo ""
+                fi
+            else
+                # 没有 pdflatex，用 Unicode 替代
+                echo ""
+                echo "  $(latex_to_unicode "$CURRENT_LATEX")"
+                echo ""
+            fi
+
+            CURRENT_LATEX=""
+            continue
+        fi
+
+        if [[ "$IN_LATEX_BLOCK" == "true" ]]; then
+            CURRENT_LATEX+="$line"$'\n'
+            continue
+        fi
+
+        # --- 普通行：处理行内 LaTeX ($...$) ---
+        if [[ "$line" =~ \$[^$]+\$ ]]; then
+            echo "$(latex_to_unicode "$line")"
+        else
+            echo "$line"
+        fi
+
+    done < "$INPUT_FILE"
+} > "$TEMP_MD"
+
+    if [ $MERMAID_COUNT -gt 0 ]; then
+        echo -e "${GREEN}✅ 渲染了 $MERMAID_COUNT 个 Mermaid 图表${NC}"
+    fi
+    if [ $LATEX_COUNT -gt 0 ]; then
+        echo -e "${GREEN}✅ 渲染了 $LATEX_COUNT 个 LaTeX 公式${NC}"
+    fi
+    if [ $MERMAID_COUNT -eq 0 ] && [ $LATEX_COUNT -eq 0 ]; then
+        echo -e "${YELLOW}ℹ️  未找到 Mermaid 或 LaTeX 内容${NC}"
+    fi
+    echo ""
+
+fi  # 结束 USE_CACHE 的 else 块
+
+# 显示渲染后的 Markdown
+if [[ "$USE_PAGER" == "true" ]]; then
+    mcat --kitty --md-image all --paging always "$TEMP_MD"
+else
+    mcat --kitty --md-image all "$TEMP_MD"
+fi
