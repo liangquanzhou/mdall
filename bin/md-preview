@@ -1,18 +1,15 @@
 #!/bin/bash
 # Markdown preview daemon launcher for yazi
-# 单例模式：同一时间只允许一个预览进程
+# 每文件独立实例：不同 md 文件互不干扰；同一文件再次预览替换自己的旧实例。
+# 每个实例由独立 watchdog 看护，浏览器 tab 关闭后自动清理，防止僵尸进程。
 
 set -u
 
 FILE="${1:-}"
 
-# Instance ID: global singleton for yazi preview
-# Forces only one preview process across all files to prevent accumulation.
-_instance_id() {
-    printf 'global'
-}
-
-_ID="global"
+# Default instance id placeholder. Real id is derived from ABS_FILE in the
+# launch path; --watchdog / --stop-all override these explicitly.
+_ID="default"
 PID_FILE="/tmp/md-preview.${_ID}.pid"
 WATCHDOG_PID_FILE="/tmp/md-preview.${_ID}.watchdog.pid"
 LOG_FILE="/tmp/md-preview.${_ID}.log"
@@ -211,8 +208,8 @@ if [ "$FILE" = "--watchdog" ]; then
     exit 0
 fi
 
-# Stop all instances
-if [ "$FILE" = "--stop-all" ]; then
+# Stop command: with per-file instances there is no "current" — stop everything.
+if [ "$FILE" = "--stop-all" ] || [ "$FILE" = "stop" ] || [ "$FILE" = "-s" ]; then
     for pf in /tmp/md-preview.*.pid; do
         [ -f "$pf" ] || continue
         id="$(echo "$pf" | sed 's|/tmp/md-preview\.\(.*\)\.pid|\1|')"
@@ -222,13 +219,6 @@ if [ "$FILE" = "--stop-all" ]; then
         stop_running
     done
     echo "All previews stopped"
-    exit 0
-fi
-
-# Stop command (single instance or current)
-if [ "$FILE" = "stop" ] || [ "$FILE" = "-s" ]; then
-    stop_running
-    echo "Preview stopped"
     exit 0
 fi
 
@@ -270,6 +260,14 @@ if [ ! -f "$ABS_FILE" ]; then
 fi
 
 cd "$FILE_DIR" || exit 1
+
+# Per-file instance id: stable hash of the absolute path. Same file replaces
+# its own previous preview; different files coexist as independent instances.
+_ID="$(printf '%s' "$ABS_FILE" | shasum -a 1 | awk '{print substr($1,1,12)}')"
+PID_FILE="/tmp/md-preview.${_ID}.pid"
+WATCHDOG_PID_FILE="/tmp/md-preview.${_ID}.watchdog.pid"
+LOG_FILE="/tmp/md-preview.${_ID}.log"
+SOCK_FILE="/tmp/md-preview.${_ID}.sock"
 
 stop_running >/dev/null 2>&1 || true
 rm -f "$SOCK_FILE"
